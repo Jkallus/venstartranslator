@@ -22,6 +22,8 @@ using Microsoft.Extensions.Logging;
 
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
+
+using SQLite;
 using VenstarTranslator.Filters;
 using VenstarTranslator.Models;
 using VenstarTranslator.Models.Db;
@@ -36,6 +38,15 @@ var config = builder.Configuration;
 ConfigureHttps(builder, config);
 var hangfireDatabasePath = config.GetConnectionString("Hangfire");
 var sqliteOptions = new SQLiteStorageOptions();
+// Hangfire.Storage.SQLite opens connections with NoMutex, but its distributed-lock heartbeat timer uses the same
+// connection as the lock's owner from another thread. The unsynchronized access eventually corrupts the database
+// ("database disk image is malformed") and all broadcasts stop. FullMutex serializes access to each connection.
+// See https://github.com/raisedapp/Hangfire.Storage.SQLite/issues/79
+var hangfireConnectionFactory = new SQLiteDbConnectionFactory(() => new SQLiteConnection(
+    hangfireDatabasePath,
+    SQLiteOpenFlags.ReadWrite | SQLiteOpenFlags.Create | SQLiteOpenFlags.FullMutex,
+    storeDateTimeAsTicks: true)
+{ BusyTimeout = TimeSpan.FromSeconds(10) });
 
 builder.Services.AddControllers().AddNewtonsoftJson(opts => opts.SerializerSettings.Converters.Add(new StringEnumConverter()));
 builder.Services.AddHealthChecks();
@@ -45,7 +56,7 @@ builder.Services.AddHangfire((provider, configuration) =>
     .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
     .UseSimpleAssemblyNameTypeSerializer()
     .UseRecommendedSerializerSettings()
-    .UseSQLiteStorage(hangfireDatabasePath, sqliteOptions);
+    .UseSQLiteStorage(hangfireConnectionFactory, sqliteOptions);
 
     // Disable automatic retries globally - BroadcastTrackingFilter handles failures
     GlobalJobFilters.Filters.Add(new AutomaticRetryAttribute { Attempts = 0, LogEvents = false });
